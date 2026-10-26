@@ -1,7 +1,9 @@
 ﻿from fastapi import FastAPI
 
+from app.config import settings
+
 app = FastAPI(
-    title="PayFlowX",
+    title=settings.app_name,
     version="0.1.0",
     description="Intelligent Payment Orchestration Engine",
 )
@@ -11,5 +13,6 @@ app = FastAPI(
 async def health():
     return {
         "status": "ok",
-        "service": "PayFlowX",
+        "service": settings.app_name,
+        "environment": settings.environment,
     }
