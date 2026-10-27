@@ -4,7 +4,7 @@
 class Settings(BaseSettings):
     app_name: str = "PayFlowX"
     environment: str = "development"
-    database_url: str = "postgresql+asyncpg://payments:payments@localhost:5432/payments"
+    database_url: str =  "postgresql+asyncpg://postgres:postgres@localhost:5432/payflowx"
     redis_url: str = "redis://localhost:6379/0"
 
     model_config = SettingsConfigDict(
