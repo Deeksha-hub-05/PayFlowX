@@ -10,6 +10,7 @@ from app.config import settings
 from app.models.base import Base
 from app.models.transaction import Transaction
 from app.models.transaction_state_log import TransactionStateLog
+from app.models.gateway_route import GatewayRoute
 
 # Alembic configuration
 config = context.config
