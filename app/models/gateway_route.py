@@ -6,6 +6,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
+from datetime import datetime, timezone
+
 
 class GatewayRoute(Base):
     __tablename__ = "gateway_routes"
