@@ -11,15 +11,32 @@ from app.api.schemas import PaymentCreate, PaymentResponse
 from app.database import get_db
 from app.models.idempotency_key import IdempotencyKey
 from app.models.transaction import Transaction
+from app.models.transaction_state_log import TransactionStateLog
 
 router = APIRouter(prefix="/api/v1/payments", tags=["Payments"])
 
 
 def make_request_hash(payment: PaymentCreate) -> str:
-    """Create a stable hash of the payment details, excluding the key."""
+    """Create a stable hash of payment details, excluding the idempotency key."""
     payload = payment.model_dump(exclude={"idempotency_key"})
-    canonical_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    canonical_payload = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
+
+def to_payment_response(transaction: Transaction) -> PaymentResponse:
+    """Convert a database transaction into the API response schema."""
+    return PaymentResponse(
+        id=str(transaction.id),
+        merchant_id=transaction.merchant_id,
+        amount=transaction.amount,
+        currency=transaction.currency,
+        payment_method=transaction.payment_method,
+        status=transaction.status,
+    )
 
 
 async def find_existing_payment(
@@ -28,7 +45,7 @@ async def find_existing_payment(
     idempotency_key: str,
     request_hash: str,
 ) -> Transaction | None:
-    """Return the original transaction, or reject unsafe key reuse."""
+    """Find a previous request and reject unsafe reuse of its key."""
     result = await db.execute(
         select(IdempotencyKey).where(
             IdempotencyKey.merchant_id == merchant_id,
@@ -43,7 +60,10 @@ async def find_existing_payment(
     if saved_key.request_hash != request_hash:
         raise HTTPException(
             status_code=409,
-            detail="Idempotency key was already used with different payment details.",
+            detail=(
+                "Idempotency key was already used with "
+                "different payment details."
+            ),
         )
 
     if saved_key.transaction_id is None:
@@ -53,7 +73,9 @@ async def find_existing_payment(
         )
 
     result = await db.execute(
-        select(Transaction).where(Transaction.id == saved_key.transaction_id)
+        select(Transaction).where(
+            Transaction.id == saved_key.transaction_id
+        )
     )
     transaction = result.scalar_one_or_none()
 
@@ -66,26 +88,16 @@ async def find_existing_payment(
     return transaction
 
 
-def to_payment_response(transaction: Transaction) -> PaymentResponse:
-    return PaymentResponse(
-        id=str(transaction.id),
-        merchant_id=transaction.merchant_id,
-        amount=transaction.amount,
-        currency=transaction.currency,
-        payment_method=transaction.payment_method,
-        status=transaction.status,
-    )
-
-
 @router.post("", response_model=PaymentResponse, status_code=201)
 async def create_payment(
     payment: PaymentCreate,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a payment once per merchant and idempotency key."""
+    """Create a payment once per merchant and record its initial audit state."""
     request_hash = make_request_hash(payment)
 
+    # Return the original transaction when this request was already processed.
     existing = await find_existing_payment(
         db,
         payment.merchant_id,
@@ -106,9 +118,21 @@ async def create_payment(
     )
 
     try:
+        # Save the transaction first so its generated ID is available.
         db.add(transaction)
         await db.flush()
 
+        # Record the initial state in the same database transaction.
+        db.add(
+            TransactionStateLog(
+                transaction_id=transaction.id,
+                previous_state=None,
+                new_state="CREATED",
+                reason="Payment transaction created",
+            )
+        )
+
+        # Store the idempotency key atomically with the transaction and audit log.
         db.add(
             IdempotencyKey(
                 merchant_id=payment.merchant_id,
@@ -122,9 +146,10 @@ async def create_payment(
         await db.refresh(transaction)
 
     except IntegrityError:
+        # Roll back all writes if a concurrent request claimed the same key.
         await db.rollback()
 
-        # Another simultaneous request may have saved this key first.
+        # If another request won the race, return its transaction when valid.
         existing = await find_existing_payment(
             db,
             payment.merchant_id,
@@ -136,6 +161,7 @@ async def create_payment(
             response.status_code = 200
             return to_payment_response(existing)
 
+        # This was a different database integrity problem.
         raise
 
     return to_payment_response(transaction)
