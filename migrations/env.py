@@ -13,6 +13,7 @@ from app.models.transaction_state_log import TransactionStateLog
 from app.models.gateway_route import GatewayRoute
 from app.models.idempotency_key import IdempotencyKey
 from app.models.gateway_health_metric import GatewayHealthMetric
+from app.models.reconciliation_log import ReconciliationLog
 
 # Alembic configuration
 config = context.config
