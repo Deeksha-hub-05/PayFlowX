@@ -21,3 +21,12 @@ class PaymentResponse(BaseModel):
     currency: str
     payment_method: str
     status: str
+
+class WebhookEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    gateway_name: Literal["Razorpay", "Stripe", "PayU"]
+    event_id: str = Field(min_length=1, max_length=255)
+    event_type: Literal["payment.authorized", "payment.failed", "payment.captured"]
+    transaction_id: str = Field(min_length=1, max_length=36)
+    status: Literal["AUTHORISED", "AUTH_FAILED", "CAPTURED", "FAILED"]
