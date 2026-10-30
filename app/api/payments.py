@@ -1,3 +1,4 @@
+
 import hashlib
 import json
 from typing import Literal
@@ -14,7 +15,7 @@ from app.models.idempotency_key import IdempotencyKey
 from app.models.transaction import Transaction
 from app.models.transaction_state_log import TransactionStateLog
 from app.services.payment_service import process_mock_payment
-from app.services.routing_service import select_gateway
+from app.services.routing_service import select_gateways
 
 router = APIRouter(prefix="/api/v1/payments", tags=["Payments"])
 
@@ -100,10 +101,14 @@ async def record_transition(
         select(Transaction).where(Transaction.id == transaction_id)
     )
     transaction = result.scalar_one_or_none()
+
     if transaction is None:
-        raise RuntimeError("Transaction disappeared while processing payment.")
+        raise RuntimeError(
+            "Transaction disappeared while processing payment."
+        )
 
     transaction.status = target_state.value
+
     db.add(
         TransactionStateLog(
             transaction_id=transaction.id,
@@ -112,8 +117,46 @@ async def record_transition(
             reason=reason,
         )
     )
+
     await db.commit()
     return target_state
+
+
+async def record_gateway_failover(
+    transaction_id,
+    previous_gateway: str,
+    next_gateway: str,
+) -> None:
+    """Record a gateway switch without changing the payment state."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Transaction).where(Transaction.id == transaction_id)
+        )
+        transaction = result.scalar_one_or_none()
+
+        if transaction is None:
+            raise RuntimeError("Transaction not found during gateway failover.")
+
+        if transaction.status != PaymentState.AUTH_INITIATED.value:
+            raise RuntimeError(
+                "Cannot fail over because the transaction is not awaiting authorization."
+            )
+
+        transaction.gateway_name = next_gateway
+
+        db.add(
+            TransactionStateLog(
+                transaction_id=transaction.id,
+                previous_state=PaymentState.AUTH_INITIATED.value,
+                new_state=PaymentState.AUTH_INITIATED.value,
+                reason=(
+                    f"Gateway failover: {previous_gateway} returned GATEWAY_DOWN "
+                    f"before processing; switched to {next_gateway}."
+                ),
+            )
+        )
+
+        await db.commit()
 
 
 @router.post("", response_model=PaymentResponse, status_code=201)
@@ -121,11 +164,23 @@ async def create_payment(
     payment: PaymentCreate,
     response: Response,
     db: AsyncSession = Depends(get_db),
-    mock_response: MockOutcome = Header(default="success", alias="X-Mock-Response"),
-    mock_delay_ms: int = Header(default=50, alias="X-Mock-Delay-Ms", ge=0, le=10000),
-    mock_gateway_down: bool = Header(default=False, alias="X-Mock-Gateway-Down"),
+    mock_response: MockOutcome = Header(
+        default="success",
+        alias="X-Mock-Response",
+    ),
+    mock_delay_ms: int = Header(
+        default=50,
+        alias="X-Mock-Delay-Ms",
+        ge=0,
+        le=10000,
+    ),
+    mock_gateway_down: bool = Header(
+        default=False,
+        alias="X-Mock-Gateway-Down",
+    ),
 ):
-    """Create a payment, route it, and persist validated state transitions."""
+    """Create a payment, route it, and safely fail over when a gateway is down."""
+
     request_hash = make_request_hash(payment)
 
     existing = await find_existing_payment(
@@ -134,16 +189,20 @@ async def create_payment(
         payment.idempotency_key,
         request_hash,
     )
+
     if existing is not None:
         response.status_code = 200
         return to_payment_response(existing)
 
-    route = await select_gateway(db, payment.payment_method)
-    if route is None:
+    routes = await select_gateways(db, payment.payment_method)
+
+    if not routes:
         raise HTTPException(
             status_code=503,
-            detail=f"No enabled gateway supports {payment.payment_method}.",
+            detail=f"No healthy gateway supports {payment.payment_method}.",
         )
+
+    route = routes[0]
 
     transaction = Transaction(
         merchant_id=payment.merchant_id,
@@ -166,6 +225,7 @@ async def create_payment(
                 reason="Payment transaction created",
             )
         )
+
         db.add(
             IdempotencyKey(
                 merchant_id=payment.merchant_id,
@@ -174,26 +234,31 @@ async def create_payment(
                 request_hash=request_hash,
             )
         )
+
         await db.commit()
         transaction_id = transaction.id
 
     except IntegrityError:
         await db.rollback()
+
         existing = await find_existing_payment(
             db,
             payment.merchant_id,
             payment.idempotency_key,
             request_hash,
         )
+
         if existing is not None:
             response.status_code = 200
             return to_payment_response(existing)
+
         raise
 
-    # Persist route selection and authorization initiation before calling the gateway.
+    # Persist initial route selection and authorization initiation.
     try:
         async with AsyncSessionLocal() as state_db:
             current_state = PaymentState.CREATED
+
             current_state = await record_transition(
                 state_db,
                 transaction_id,
@@ -201,57 +266,103 @@ async def create_payment(
                 PaymentState.ROUTE_SELECTED,
                 f"Selected gateway {route.gateway_name}",
             )
-            current_state = await record_transition(
+
+            await record_transition(
                 state_db,
                 transaction_id,
                 current_state,
                 PaymentState.AUTH_INITIATED,
                 "Mock gateway authorization initiated",
             )
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail="Could not persist payment authorization state.",
         ) from exc
 
-    # Do not hold a database session while waiting for the gateway.
-    try:
-        gateway_result = await process_mock_payment(
-            gateway_name=route.gateway_name,
-            amount=payment.amount,
-            payment_method=payment.payment_method,
-            outcome=mock_response,
-            delay_ms=mock_delay_ms,
-            gateway_down=mock_gateway_down,
-        )
-    except Exception as exc:
-        # We cannot safely assume a gateway error means the payment failed.
-        try:
-            async with AsyncSessionLocal() as state_db:
-                await record_transition(
-                    state_db,
-                    transaction_id,
-                    PaymentState.AUTH_INITIATED,
-                    PaymentState.UNKNOWN,
-                    f"Gateway processing raised an exception: {type(exc).__name__}",
-                )
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=502,
-            detail="Gateway processing failed unexpectedly; payment outcome may require reconciliation.",
-        ) from exc
+    # Try gateways in weighted score order.
+    gateway_result = None
 
+    for index, current_route in enumerate(routes):
+        try:
+            gateway_result = await process_mock_payment(
+                gateway_name=current_route.gateway_name,
+                amount=payment.amount,
+                payment_method=payment.payment_method,
+                outcome=mock_response,
+                delay_ms=mock_delay_ms,
+                gateway_down=mock_gateway_down,
+            )
+
+        except Exception as exc:
+            # An exception has an uncertain payment outcome.
+            try:
+                async with AsyncSessionLocal() as state_db:
+                    await record_transition(
+                        state_db,
+                        transaction_id,
+                        PaymentState.AUTH_INITIATED,
+                        PaymentState.UNKNOWN,
+                        (
+                            "Gateway processing raised an exception: "
+                            f"{type(exc).__name__}"
+                        ),
+                    )
+            except Exception:
+                pass
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Gateway processing failed unexpectedly; "
+                    "payment outcome may require reconciliation."
+                ),
+            ) from exc
+
+        # Only a confirmed pre-processing gateway outage permits failover.
+        if gateway_result.status == "GATEWAY_DOWN":
+            if index + 1 < len(routes):
+                next_route = routes[index + 1]
+
+                try:
+                    await record_gateway_failover(
+                        transaction_id,
+                        current_route.gateway_name,
+                        next_route.gateway_name,
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Could not persist gateway failover.",
+                    ) from exc
+
+                continue
+
+        break
+
+    if gateway_result is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No gateway could process the payment.",
+        )
+
+    # Persist the final result.
     try:
         async with AsyncSessionLocal() as state_db:
+
             if gateway_result.status == "SUCCEEDED":
                 current_state = await record_transition(
                     state_db,
                     transaction_id,
                     PaymentState.AUTH_INITIATED,
                     PaymentState.AUTHORISED,
-                    f"Gateway authorization approved: {gateway_result.message}",
+                    (
+                        f"Gateway authorization approved: "
+                        f"{gateway_result.message}"
+                    ),
                 )
+
                 current_state = await record_transition(
                     state_db,
                     transaction_id,
@@ -259,13 +370,15 @@ async def create_payment(
                     PaymentState.CAPTURE_INITIATED,
                     "Full payment capture initiated",
                 )
+
                 await record_transition(
                     state_db,
                     transaction_id,
                     current_state,
                     PaymentState.CAPTURED,
                     (
-                        f"Gateway {gateway_result.gateway_name}: payment captured; "
+                        f"Gateway {gateway_result.gateway_name}: "
+                        f"payment captured; "
                         f"latency_ms={gateway_result.latency_ms}"
                     ),
                 )
@@ -278,7 +391,8 @@ async def create_payment(
                     PaymentState.AUTH_FAILED,
                     (
                         f"Gateway {gateway_result.gateway_name}: "
-                        f"{gateway_result.message}; latency_ms={gateway_result.latency_ms}"
+                        f"{gateway_result.message}; "
+                        f"latency_ms={gateway_result.latency_ms}"
                     ),
                 )
 
@@ -290,16 +404,21 @@ async def create_payment(
                     PaymentState.UNKNOWN,
                     (
                         f"Gateway {gateway_result.gateway_name}: "
-                        f"{gateway_result.status} - {gateway_result.message}; "
+                        f"{gateway_result.status} - "
+                        f"{gateway_result.message}; "
                         f"latency_ms={gateway_result.latency_ms}"
                     ),
                 )
 
             result = await state_db.execute(
-                select(Transaction).where(Transaction.id == transaction_id)
+                select(Transaction).where(
+                    Transaction.id == transaction_id
+                )
             )
+
             saved_transaction = result.scalar_one()
             await state_db.refresh(saved_transaction)
+
             return to_payment_response(saved_transaction)
 
     except Exception as exc:

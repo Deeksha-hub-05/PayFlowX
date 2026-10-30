@@ -1,3 +1,4 @@
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +41,6 @@ def calculate_gateway_score(
         ) * 100
 
     health_score = 100.0 if health.is_healthy else 0.0
-
     payment_method_score = 100.0
 
     return (
@@ -52,11 +52,11 @@ def calculate_gateway_score(
     )
 
 
-async def select_gateway(
+async def select_gateways(
     db: AsyncSession,
     payment_method: str,
-) -> GatewayRoute | None:
-    """Select the highest-scoring healthy gateway for a payment method."""
+) -> list[GatewayRoute]:
+    """Return all eligible gateways in weighted score order."""
 
     routes_result = await db.execute(
         select(GatewayRoute).where(
@@ -67,7 +67,7 @@ async def select_gateway(
     routes = routes_result.scalars().all()
 
     if not routes:
-        return None
+        return []
 
     health_result = await db.execute(
         select(GatewayHealthMetric).where(
@@ -89,16 +89,10 @@ async def select_gateway(
     ]
 
     if not eligible:
-        return None
+        return []
 
-    latencies = [
-        health.average_latency_ms
-        for _, health in eligible
-    ]
-    costs = [
-        route.cost_per_transaction
-        for route, _ in eligible
-    ]
+    latencies = [health.average_latency_ms for _, health in eligible]
+    costs = [route.cost_per_transaction for route, _ in eligible]
 
     min_latency = min(latencies)
     max_latency = max(latencies)
@@ -128,4 +122,14 @@ async def select_gateway(
         )
     )
 
-    return scored_routes[0][1]
+    return [route for _, route in scored_routes]
+
+
+async def select_gateway(
+    db: AsyncSession,
+    payment_method: str,
+) -> GatewayRoute | None:
+    """Select the highest-scoring healthy gateway."""
+
+    gateways = await select_gateways(db, payment_method)
+    return gateways[0] if gateways else None
