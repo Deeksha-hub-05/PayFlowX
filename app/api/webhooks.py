@@ -1,12 +1,16 @@
+
+import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import WebhookEvent
+from app.config import settings
 from app.database import get_db
 from app.domain.state_machine import (
     InvalidStateTransition,
@@ -28,14 +32,57 @@ EVENT_TARGET_STATES = {
 }
 
 
+WEBHOOK_SECRETS = {
+    "Razorpay": settings.razorpay_webhook_secret,
+    "Stripe": settings.stripe_webhook_secret,
+    "PayU": settings.payu_webhook_secret,
+}
+
+
+def verify_webhook_signature(
+    gateway_name: str,
+    payload: bytes,
+    signature: str | None,
+) -> bool:
+    secret = WEBHOOK_SECRETS.get(gateway_name)
+
+    if not secret or not signature:
+        return False
+
+    expected_signature = "sha256=" + hmac.new(
+        secret.encode("utf-8"),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+
+    return hmac.compare_digest(expected_signature, signature)
+
+
 @router.post("/{gateway_name}")
 async def receive_webhook(
     gateway_name: str,
+    request: Request,
     event: WebhookEvent,
+    x_webhook_signature: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     if gateway_name != event.gateway_name:
         raise HTTPException(status_code=400, detail="Gateway name mismatch.")
+
+    if gateway_name not in WEBHOOK_SECRETS:
+        raise HTTPException(status_code=400, detail="Unsupported gateway.")
+
+    raw_body = await request.body()
+
+    if not verify_webhook_signature(
+        gateway_name,
+        raw_body,
+        x_webhook_signature,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing webhook signature.",
+        )
 
     target_state = EVENT_TARGET_STATES[event.event_type]
 
