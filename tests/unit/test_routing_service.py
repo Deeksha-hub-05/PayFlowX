@@ -1,4 +1,5 @@
-from unittest.mock import AsyncMock, MagicMock
+
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -74,7 +75,12 @@ async def test_select_gateway_returns_highest_scoring_gateway():
         [razorpay_health, stripe_health],
     )
 
-    selected = await select_gateway(db, "UPI")
+    with patch(
+        "app.services.routing_service.is_gateway_available",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        selected = await select_gateway(db, "UPI")
 
     assert selected is stripe
     assert db.execute.await_count == 2
@@ -107,7 +113,12 @@ async def test_select_gateway_excludes_unhealthy_gateways():
         [healthy_health],
     )
 
-    selected = await select_gateway(db, "UPI")
+    with patch(
+        "app.services.routing_service.is_gateway_available",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        selected = await select_gateway(db, "UPI")
 
     assert selected is healthy_route
 

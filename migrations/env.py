@@ -15,6 +15,7 @@ from app.models.idempotency_key import IdempotencyKey
 from app.models.gateway_health_metric import GatewayHealthMetric
 from app.models.reconciliation_log import ReconciliationLog
 from app.models.processed_webhook_event import ProcessedWebhookEvent
+from app.models.gateway_circuit_breaker import GatewayCircuitBreaker
 
 # Alembic configuration
 config = context.config

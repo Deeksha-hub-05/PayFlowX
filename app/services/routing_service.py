@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.gateway_health_metric import GatewayHealthMetric
 from app.models.gateway_route import GatewayRoute
-
+from app.services.circuit_breaker_service import is_gateway_available
 
 def calculate_gateway_score(
     route: GatewayRoute,
@@ -82,11 +82,22 @@ async def select_gateways(
         for metric in health_metrics
     }
 
-    eligible = [
-        (route, health_by_gateway[route.gateway_name])
-        for route in routes
-        if route.gateway_name in health_by_gateway
-    ]
+    eligible = []
+
+    for route in routes:
+        health = health_by_gateway.get(route.gateway_name)
+
+        if health is None:
+            continue
+
+        available = await is_gateway_available(
+            db,
+            route.gateway_name,
+            payment_method,
+        )
+
+        if available:
+            eligible.append((route, health))
 
     if not eligible:
         return []
