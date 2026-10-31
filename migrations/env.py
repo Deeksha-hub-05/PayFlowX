@@ -16,6 +16,8 @@ from app.models.gateway_health_metric import GatewayHealthMetric
 from app.models.reconciliation_log import ReconciliationLog
 from app.models.processed_webhook_event import ProcessedWebhookEvent
 from app.models.gateway_circuit_breaker import GatewayCircuitBreaker
+from app.models.refund import Refund
+from app.models.gateway_config import GatewayConfig
 
 # Alembic configuration
 config = context.config
