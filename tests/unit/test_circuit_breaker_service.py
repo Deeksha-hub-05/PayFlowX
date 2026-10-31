@@ -113,3 +113,19 @@ async def test_five_failures_open_breaker():
     assert breaker.state == OPEN
     assert breaker.opened_at is not None
     db.flush.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_half_open_failure_immediately_reopens_breaker():
+    breaker = make_breaker(
+        state=HALF_OPEN,
+        failure_count=1,
+        failure_threshold=5,
+    )
+    db = make_db(breaker)
+
+    await record_gateway_failure(db, "Razorpay", "UPI")
+
+    assert breaker.failure_count == 2
+    assert breaker.state == OPEN
+    assert breaker.opened_at is not None
+    db.flush.assert_awaited_once()

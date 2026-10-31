@@ -1,4 +1,3 @@
-
 import hashlib
 import json
 from typing import Literal
@@ -16,6 +15,10 @@ from app.models.transaction import Transaction
 from app.models.transaction_state_log import TransactionStateLog
 from app.services.payment_service import process_mock_payment
 from app.services.routing_service import select_gateways
+from app.services.circuit_breaker_service import (
+    record_gateway_failure,
+    record_gateway_success,
+)
 
 router = APIRouter(prefix="/api/v1/payments", tags=["Payments"])
 
@@ -74,7 +77,9 @@ async def find_existing_payment(
         )
 
     result = await db.execute(
-        select(Transaction).where(Transaction.id == saved_key.transaction_id)
+        select(Transaction).where(
+            Transaction.id == saved_key.transaction_id
+        )
     )
     transaction = result.scalar_one_or_none()
 
@@ -98,7 +103,9 @@ async def record_transition(
     PaymentStateMachine.validate(current_state, target_state)
 
     result = await db.execute(
-        select(Transaction).where(Transaction.id == transaction_id)
+        select(Transaction).where(
+            Transaction.id == transaction_id
+        )
     )
     transaction = result.scalar_one_or_none()
 
@@ -122,6 +129,29 @@ async def record_transition(
     return target_state
 
 
+async def update_gateway_breaker(
+    gateway_name: str,
+    payment_method: str,
+    succeeded: bool,
+) -> None:
+    """Update gateway circuit-breaker status in a separate DB session."""
+    async with AsyncSessionLocal() as breaker_db:
+        if succeeded:
+            await record_gateway_success(
+                breaker_db,
+                gateway_name,
+                payment_method,
+            )
+        else:
+            await record_gateway_failure(
+                breaker_db,
+                gateway_name,
+                payment_method,
+            )
+
+        await breaker_db.commit()
+
+
 async def record_gateway_failover(
     transaction_id,
     previous_gateway: str,
@@ -130,12 +160,16 @@ async def record_gateway_failover(
     """Record a gateway switch without changing the payment state."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Transaction).where(Transaction.id == transaction_id)
+            select(Transaction).where(
+                Transaction.id == transaction_id
+            )
         )
         transaction = result.scalar_one_or_none()
 
         if transaction is None:
-            raise RuntimeError("Transaction not found during gateway failover.")
+            raise RuntimeError(
+                "Transaction not found during gateway failover."
+            )
 
         if transaction.status != PaymentState.AUTH_INITIATED.value:
             raise RuntimeError(
@@ -194,7 +228,10 @@ async def create_payment(
         response.status_code = 200
         return to_payment_response(existing)
 
-    routes = await select_gateways(db, payment.payment_method)
+    routes = await select_gateways(
+        db,
+        payment.payment_method,
+    )
 
     if not routes:
         raise HTTPException(
@@ -309,6 +346,13 @@ async def create_payment(
                             f"{type(exc).__name__}"
                         ),
                     )
+
+                await update_gateway_breaker(
+                    current_route.gateway_name,
+                    payment.payment_method,
+                    succeeded=False,
+                )
+
             except Exception:
                 pass
 
@@ -322,6 +366,12 @@ async def create_payment(
 
         # Only a confirmed pre-processing gateway outage permits failover.
         if gateway_result.status == "GATEWAY_DOWN":
+            await update_gateway_breaker(
+                current_route.gateway_name,
+                payment.payment_method,
+                succeeded=False,
+            )
+
             if index + 1 < len(routes):
                 next_route = routes[index + 1]
 
@@ -331,6 +381,7 @@ async def create_payment(
                         current_route.gateway_name,
                         next_route.gateway_name,
                     )
+
                 except Exception as exc:
                     raise HTTPException(
                         status_code=500,
@@ -338,6 +389,25 @@ async def create_payment(
                     ) from exc
 
                 continue
+
+            break
+
+        # A successful response or business decline means the gateway
+        # itself responded, so reset its circuit breaker.
+        if gateway_result.status in ("SUCCEEDED", "FAILED"):
+            await update_gateway_breaker(
+                current_route.gateway_name,
+                payment.payment_method,
+                succeeded=True,
+            )
+
+        # Timeouts and other uncertain outcomes count as gateway failures.
+        else:
+            await update_gateway_breaker(
+                current_route.gateway_name,
+                payment.payment_method,
+                succeeded=False,
+            )
 
         break
 

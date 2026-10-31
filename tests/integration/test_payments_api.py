@@ -123,6 +123,11 @@ def test_payment_fails_over_to_next_gateway(client, monkeypatch):
         "AsyncSessionLocal",
         lambda: FakeAsyncSession(),
     )
+    monkeypatch.setattr(
+        payments,
+        "update_gateway_breaker",
+        AsyncMock(),
+    )
 
     async def fake_record_transition(
         db,

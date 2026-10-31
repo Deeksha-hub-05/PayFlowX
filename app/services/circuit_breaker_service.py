@@ -102,7 +102,12 @@ async def record_gateway_failure(
     breaker.failure_count += 1
     breaker.last_failure_at = now
 
-    if breaker.failure_count >= breaker.failure_threshold:
+    # A failed HALF_OPEN probe immediately reopens the circuit.
+    if breaker.state == HALF_OPEN:
+        breaker.state = OPEN
+        breaker.opened_at = now
+
+    elif breaker.failure_count >= breaker.failure_threshold:
         breaker.state = OPEN
         breaker.opened_at = now
 
