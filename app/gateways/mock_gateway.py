@@ -31,6 +31,7 @@ class MockGateway:
         gateway_down: bool = False,
     ) -> GatewayResult:
         """Simulate a charge and return a predictable gateway result."""
+
         if amount <= 0:
             raise ValueError("Amount must be greater than zero.")
 
@@ -74,7 +75,6 @@ class MockGateway:
             message=message,
             latency_ms=delay_ms,
         )
-
 
     async def refund(
         self,
@@ -135,6 +135,74 @@ class MockGateway:
                 success=False,
                 status="ERROR",
                 message="Mock gateway refund error.",
+                latency_ms=delay_ms,
+            )
+
+        raise ValueError(f"Unsupported mock outcome: {outcome}")
+
+    async def fetch_transaction_status(
+        self,
+        transaction_id: str,
+        outcome: MockOutcome = "success",
+        delay_ms: int = 50,
+        gateway_down: bool = False,
+    ) -> GatewayResult:
+        """
+        Simulate a read-only gateway transaction-status lookup.
+
+        This method never creates or charges a payment.
+        """
+
+        if not transaction_id.strip():
+            raise ValueError("Transaction ID cannot be empty.")
+
+        if delay_ms < 0:
+            raise ValueError("Delay cannot be negative.")
+
+        if gateway_down:
+            return GatewayResult(
+                gateway_name=self.gateway_name,
+                success=False,
+                status="GATEWAY_DOWN",
+                message="Mock gateway is unavailable.",
+                latency_ms=0,
+            )
+
+        await asyncio.sleep(delay_ms / 1000)
+
+        if outcome == "success":
+            return GatewayResult(
+                gateway_name=self.gateway_name,
+                success=True,
+                status="CAPTURED",
+                message="Mock gateway confirms successful payment.",
+                latency_ms=delay_ms,
+            )
+
+        if outcome == "failure":
+            return GatewayResult(
+                gateway_name=self.gateway_name,
+                success=True,
+                status="FAILED",
+                message="Mock gateway confirms payment failure.",
+                latency_ms=delay_ms,
+            )
+
+        if outcome == "timeout":
+            return GatewayResult(
+                gateway_name=self.gateway_name,
+                success=False,
+                status="UNKNOWN",
+                message="Gateway status lookup timed out.",
+                latency_ms=delay_ms,
+            )
+
+        if outcome == "error":
+            return GatewayResult(
+                gateway_name=self.gateway_name,
+                success=False,
+                status="ERROR",
+                message="Mock gateway status lookup failed.",
                 latency_ms=delay_ms,
             )
 

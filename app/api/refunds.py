@@ -1,7 +1,8 @@
+
 from typing import Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -412,3 +413,71 @@ async def create_refund(
         response.status_code = 200
 
     return to_refund_response(updated_refund)
+
+
+# --------------------------------------------------
+# GET: List refunds belonging to a merchant
+# --------------------------------------------------
+
+@router.get(
+    "",
+    response_model=list[RefundResponse],
+)
+async def list_refunds(
+    merchant_id: str = Query(..., min_length=1, max_length=100),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """List refunds belonging to a merchant with pagination."""
+
+    result = await db.execute(
+        select(Refund)
+        .join(Transaction, Refund.transaction_id == Transaction.id)
+        .where(Transaction.merchant_id == merchant_id)
+        .order_by(Refund.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    refunds = result.scalars().all()
+
+    return [
+        to_refund_response(refund)
+        for refund in refunds
+    ]
+
+
+# --------------------------------------------------
+# GET: Retrieve one refund by ID
+# --------------------------------------------------
+
+@router.get(
+    "/{refund_id}",
+    response_model=RefundResponse,
+)
+async def get_refund(
+    refund_id: UUID,
+    merchant_id: str = Query(..., min_length=1, max_length=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve a refund belonging to a merchant."""
+
+    result = await db.execute(
+        select(Refund)
+        .join(Transaction, Refund.transaction_id == Transaction.id)
+        .where(
+            Refund.id == refund_id,
+            Transaction.merchant_id == merchant_id,
+        )
+    )
+
+    refund = result.scalar_one_or_none()
+
+    if refund is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Refund not found.",
+        )
+
+    return to_refund_response(refund)

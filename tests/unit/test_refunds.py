@@ -13,7 +13,9 @@ from app.api.refunds import (
     create_state_log,
     finalize_refund,
     find_existing_refund,
+    get_refund,
     get_refundable_transaction,
+    list_refunds,
     mark_refund_unknown,
     to_refund_response,
 )
@@ -1274,3 +1276,109 @@ async def test_create_refund_integrity_error_returns_existing(
     assert result.status == "REFUNDED"
     db.rollback.assert_awaited_once()
     gateway_mock.assert_not_awaited()
+
+
+    # --------------------------------------------------
+# Tests for GET /api/v1/refunds
+# --------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_list_refunds_success():
+    db = AsyncMock()
+
+    refund = SimpleNamespace(
+        id=uuid4(),
+        transaction_id=uuid4(),
+        amount=500,
+        currency="INR",
+        status="REFUNDED",
+        gateway_name="Razorpay",
+        gateway_refund_id="mock-refund-123",
+    )
+
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [refund]
+    db.execute.return_value = result
+
+    response = await list_refunds(
+        merchant_id="merchant_test",
+        limit=20,
+        offset=0,
+        db=db,
+    )
+
+    assert len(response) == 1
+    assert response[0].amount == 500
+    assert response[0].status == "REFUNDED"
+    assert response[0].gateway_name == "Razorpay"
+    db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_list_refunds_empty():
+    db = AsyncMock()
+
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    db.execute.return_value = result
+
+    response = await list_refunds(
+        merchant_id="merchant_test",
+        limit=20,
+        offset=0,
+        db=db,
+    )
+
+    assert response == []
+    db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_refund_success():
+    db = AsyncMock()
+    refund_id = uuid4()
+
+    refund = SimpleNamespace(
+        id=refund_id,
+        transaction_id=uuid4(),
+        amount=500,
+        currency="INR",
+        status="REFUNDED",
+        gateway_name="Razorpay",
+        gateway_refund_id="mock-refund-123",
+    )
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = refund
+    db.execute.return_value = result
+
+    response = await get_refund(
+        refund_id=refund_id,
+        merchant_id="merchant_test",
+        db=db,
+    )
+
+    assert response.id == str(refund_id)
+    assert response.amount == 500
+    assert response.status == "REFUNDED"
+    db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_refund_not_found():
+    db = AsyncMock()
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    db.execute.return_value = result
+
+    with pytest.raises(HTTPException) as exc:
+        await get_refund(
+            refund_id=uuid4(),
+            merchant_id="merchant_test",
+            db=db,
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Refund not found."
+    db.execute.assert_awaited_once()

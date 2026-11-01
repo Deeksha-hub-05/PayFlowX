@@ -38,3 +38,21 @@ async def process_mock_refund(
         delay_ms=delay_ms,
         gateway_down=gateway_down,
     )
+
+
+async def fetch_mock_transaction_status(
+    gateway_name: str,
+    transaction_id: str,
+    outcome: str = "success",
+    delay_ms: int = 50,
+    gateway_down: bool = False,
+) -> GatewayResult:
+    """Fetch payment status without initiating another payment."""
+    gateway = MockGateway(gateway_name)
+
+    return await gateway.fetch_transaction_status(
+        transaction_id=transaction_id,
+        outcome=outcome,  # type: ignore[arg-type]
+        delay_ms=delay_ms,
+        gateway_down=gateway_down,
+    )
