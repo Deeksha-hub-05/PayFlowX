@@ -7,14 +7,23 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.models.base import Base
 
 
+
 class Refund(Base):
     __tablename__ = "refunds"
+    __table_args__ = (
+        UniqueConstraint(
+            "transaction_id",
+            "idempotency_key",
+            name="uq_refund_transaction_idempotency",
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
@@ -24,6 +33,8 @@ class Refund(Base):
         nullable=False,
         index=True,
     )
+
+    idempotency_key = Column(String(255), nullable=False)
 
     amount = Column(Integer, nullable=False)
     currency = Column(String(3), nullable=False)

@@ -20,3 +20,21 @@ async def process_mock_payment(
         delay_ms=delay_ms,
         gateway_down=gateway_down,
     )
+
+
+async def process_mock_refund(
+    gateway_name: str,
+    amount: int,
+    outcome: str = "success",
+    delay_ms: int = 50,
+    gateway_down: bool = False,
+) -> GatewayResult:
+    """Execute a refund using the selected mock gateway."""
+    gateway = MockGateway(gateway_name)
+
+    return await gateway.refund(
+        amount=amount,
+        outcome=outcome,  # type: ignore[arg-type]
+        delay_ms=delay_ms,
+        gateway_down=gateway_down,
+    )
