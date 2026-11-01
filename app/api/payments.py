@@ -19,6 +19,8 @@ from app.services.circuit_breaker_service import (
     record_gateway_failure,
     record_gateway_success,
 )
+from uuid import UUID
+from fastapi import Query
 
 router = APIRouter(prefix="/api/v1/payments", tags=["Payments"])
 
@@ -496,3 +498,53 @@ async def create_payment(
             status_code=500,
             detail="Could not persist the final payment state.",
         ) from exc
+
+@router.get("/{transaction_id}", response_model=PaymentResponse)
+async def get_payment(
+    transaction_id: UUID,
+    merchant_id: str = Query(min_length=1, max_length=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve a payment belonging to a specific merchant."""
+
+    result = await db.execute(
+        select(Transaction).where(
+            Transaction.id == transaction_id,
+            Transaction.merchant_id == merchant_id,
+        )
+    )
+
+    transaction = result.scalar_one_or_none()
+
+    if transaction is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Payment transaction not found.",
+        )
+
+    return to_payment_response(transaction)
+
+
+@router.get("", response_model=list[PaymentResponse])
+async def list_payments(
+    merchant_id: str = Query(min_length=1, max_length=100),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """List a merchant's payments with pagination."""
+
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.merchant_id == merchant_id)
+        .order_by(Transaction.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    transactions = result.scalars().all()
+
+    return [
+        to_payment_response(transaction)
+        for transaction in transactions
+    ]     

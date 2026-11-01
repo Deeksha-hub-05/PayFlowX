@@ -1,7 +1,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PaymentCreate(BaseModel):
@@ -22,34 +22,25 @@ class PaymentResponse(BaseModel):
     payment_method: str
     status: str
 
+
 class WebhookEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     gateway_name: Literal["Razorpay", "Stripe", "PayU"]
     event_id: str = Field(min_length=1, max_length=255)
-    event_type: Literal["payment.authorized", "payment.failed", "payment.captured"]
+    event_type: Literal[
+        "payment.authorized",
+        "payment.failed",
+        "payment.captured",
+    ]
     transaction_id: str = Field(min_length=1, max_length=36)
-    status: Literal["AUTHORISED", "AUTH_FAILED", "CAPTURED", "FAILED"]
+    status: Literal[
+        "AUTHORISED",
+        "AUTH_FAILED",
+        "CAPTURED",
+        "FAILED",
+    ]
 
-
-
-class RefundCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    transaction_id: str = Field(min_length=1, max_length=36)
-    amount: int = Field(gt=0, description="Refund amount in the smallest currency unit")
-    idempotency_key: str = Field(min_length=1, max_length=255)
-
-
-class RefundResponse(BaseModel):
-    id: str
-    transaction_id: str
-    amount: int
-    currency: str
-    status: str
-    gateway_name: str
-    gateway_refund_id: str | None = None
-    
 
 class RefundCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -61,3 +52,13 @@ class RefundCreate(BaseModel):
         description="Refund amount in the smallest currency unit",
     )
     idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class RefundResponse(BaseModel):
+    id: str
+    transaction_id: str
+    amount: int
+    currency: str
+    status: str
+    gateway_name: str
+    gateway_refund_id: str | None = None
